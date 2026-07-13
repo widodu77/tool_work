@@ -74,7 +74,7 @@ def run_agent(question, max_steps=12):
 
 
 if __name__ == "__main__":
-    query = "Can you tell me about U-Nets: what they are, what they're used for, and briefly how they work?"
+    query = "compare U-Nets and Vision Transformers for images"
     print(run_agent(query))
 
 
