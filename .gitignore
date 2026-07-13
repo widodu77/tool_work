@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — NEVER commit your API key
+.env
+
+# Vector DB (regenerated on ingest)
+chroma_db/
+
+# Downloaded papers (regenerated on ingest)
+*.pdf
