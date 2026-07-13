@@ -1,18 +1,12 @@
 import urllib.parse
-import urllib.request  
-import ollama  
-import feedparser 
-from pypdf import PdfReader 
-from sentence_transformers import SentenceTransformer  
-import numpy as np  
+import urllib.request
+import feedparser
+from pypdf import PdfReader
 import chromadb
 
-# High-level pipeline comments:
-# - retrieve(): query arXiv and download a PDF called "paper.pdf"
-# - parse(): read a PDF, chunk the text, embed chunks, and return top chunks matching a query
+chroma_client = chromadb.PersistentClient(path="./chroma_db")   # persists across runs
+corpus = chroma_client.get_or_create_collection(name="arxiv_corpus")
 
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-paper_embedding_cache = {}
 
 def search_arxiv(title):
     encoded_title = urllib.parse.quote(title)
@@ -21,7 +15,7 @@ def search_arxiv(title):
     feed = feedparser.parse(raw)
 
     papers = []
-    for entry in feed.entries[:5]:
+    for entry in feed.entries[:3]:
         pdf_url = next((link.href for link in entry.links if link.get("title") == "pdf"), None)
         paper_id = entry.id.rsplit("/", 1)[-1] if getattr(entry, "id", None) else None
         papers.append({
@@ -30,33 +24,35 @@ def search_arxiv(title):
             "pdf_url": pdf_url,
             "id": paper_id,
         })
-
     return papers
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db")  # saves to disk
 
-corpus = chroma_client.get_or_create_collection(name="arxiv_corpus")
+def chunking(text, size=700, overlap=100):
+    if overlap >= size:
+        raise ValueError("overlap must be smaller than size")
+    step = size - overlap
+    return [text[start:start + size] for start in range(0, len(text), step)]
 
-def ingest_paper(paper_name, paper_id, title):
-    # 1. Skip if this paper is already in the corpus
+
+def ingest_paper(pdf_url, paper_id, title):
+    # Skip if this paper is already in the corpus
     existing = corpus.get(where={"paper_id": paper_id}, limit=1)
     if existing["ids"]:
-        return f"{title} already in corpus."
-    
-    def chunking(text, size=700, overlap=100):
-        
-        if overlap >= size:
-            raise ValueError("overlap must be smaller than size")
-        step = size - overlap  
-        return [text[start:start + size] for start in range(0, len(text), step)]
+        return f"'{title}' is already in the corpus."
 
-    # 2. Extract + chunk the PDF text
-    pdf_path = paper_name if paper_name.lower().endswith(".pdf") else f"{paper_name}.pdf"
-    reader = PdfReader(pdf_path)
+    # Download the PDF
+    local_path = f"{paper_id}.pdf".replace("/", "_")
+    with urllib.request.urlopen(pdf_url) as response, open(local_path, "wb") as f:
+        f.write(response.read())
+
+    # Extract + chunk
+    reader = PdfReader(local_path)
     full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
     chunks = chunking(full_text)
+    if not chunks:
+        return f"Could not extract any text from '{title}'."
 
-    # 3. Add to the shared corpus WITH source metadata + unique ids
+    # Add to the shared corpus with source metadata + globally-unique ids
     corpus.add(
         documents=chunks,
         ids=[f"{paper_id}_chunk_{i}" for i in range(len(chunks))],
@@ -65,16 +61,11 @@ def ingest_paper(paper_name, paper_id, title):
     )
     return f"Ingested '{title}' ({len(chunks)} chunks)."
 
+
 def retrieve(query, k=5):
     results = corpus.query(query_texts=[query], n_results=k)
-    docs  = results["documents"][0]
-    metas = results["metadatas"][0]      # <-- source info comes back here
-    # format so the model sees which paper each chunk is from:
-    return "\n\n".join(
-        f"[from: {m['title']}]\n{d}" for d, m in zip(docs, metas)
-    )
-
-
-
-
-
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+    if not docs:
+        return "No relevant chunks found in the corpus. Ingest a paper first."
+    return "\n\n".join(f"[from: {m['title']}]\n{d}" for d, m in zip(docs, metas))

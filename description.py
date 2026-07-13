@@ -2,36 +2,12 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "parse",
-            "description": "Reads a PDF, extracts its text, splits it into chunks, embeds the chunks, and returns the most relevant chunks for a query.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "paper_name": {
-                        "type": "string",
-                        "description": "The PDF file name to read, such as paper.pdf.",
-                    },
-                    "main_query": {
-                        "type": "string",
-                        "description": "The user's question or search query.",
-                    },
-                },
-                "required": ["paper_name", "main_query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "search_arxiv",
-            "description": "Searches arXiv for papers matching a title query and returns their metadata.",
+            "description": "Search arXiv for papers matching a keyword phrase. Returns candidate papers, each with a title, abstract, pdf_url, and id.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "The paper title or keyword phrase to search for.",
-                    }
+                    "title": {"type": "string", "description": "Keyword phrase or paper title to search for."}
                 },
                 "required": ["title"],
             },
@@ -40,46 +16,16 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "download_from_arx",
-            "description": "Downloads a PDF from a provided arXiv URL and saves it under a chosen file name.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pdf_url": {
-                        "type": "string",
-                        "description": "The direct URL of the PDF to download.",
-                    },
-                    "paper_name": {
-                        "type": "string",
-                        "description": "The base name to use for the saved PDF file.",
-                    },
-                },
-                "required": ["pdf_url", "paper_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "ingest_paper",
-            "description": "Ingests a paper PDF into the shared Chroma corpus with chunk metadata.",
+            "description": "Download a paper's PDF and add it to the shared corpus so it can be searched. Call once per paper you want to read.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "paper_name": {
-                        "type": "string",
-                        "description": "The PDF file name to ingest, such as paper.pdf.",
-                    },
-                    "paper_id": {
-                        "type": "string",
-                        "description": "A unique paper identifier used for corpus deduplication.",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "The paper title to store in metadata.",
-                    },
+                    "pdf_url": {"type": "string", "description": "The paper's pdf_url, taken from search_arxiv results."},
+                    "paper_id": {"type": "string", "description": "The paper's id, taken from search_arxiv results."},
+                    "title": {"type": "string", "description": "The paper's title, taken from search_arxiv results."},
                 },
-                "required": ["paper_name", "paper_id", "title"],
+                "required": ["pdf_url", "paper_id", "title"],
             },
         },
     },
@@ -87,18 +33,12 @@ tools = [
         "type": "function",
         "function": {
             "name": "retrieve",
-            "description": "Searches the shared Chroma corpus and returns the most relevant document chunks for a query.",
+            "description": "Search the shared corpus of ingested papers and return the most relevant chunks. Each chunk is tagged with the paper it came from.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query used to retrieve relevant chunks.",
-                    },
-                    "k": {
-                        "type": "integer",
-                        "description": "The number of top chunks to return.",
-                    },
+                    "query": {"type": "string", "description": "The question or topic to search the corpus for."},
+                    "k": {"type": "integer", "description": "How many chunks to return (default 5)."},
                 },
                 "required": ["query"],
             },
@@ -106,39 +46,17 @@ tools = [
     },
 ]
 
-SYSTEM_PROMPT = """You are a research assistant that answers questions about scientific papers using your tools.
+SYSTEM_PROMPT = """You are a research assistant that answers questions using a corpus of scientific papers and your tools.
 
-Workflow:
-1. Call `search_arxiv` ONCE with a short keyword phrase. The results already contain relevant papers.
-2. Pick the single most relevant paper from those results. Do NOT search again — the first results are good enough.
-3. Call `download_from_arx` with that paper's pdf_url and a short paper_name. It returns the saved filename.
-4. Call `parse` with that filename and the question.
-5. As soon as `parse` returns chunks, WRITE YOUR ANSWER using only those chunks.
+Workflow for every question:
+1. Call `search_arxiv` with a short keyword phrase to find candidate papers.
+2. Pick the most relevant paper (or two, if the question spans more than one topic).
+3. For each chosen paper, call `ingest_paper` with its pdf_url, id, and title. This adds it to the corpus.
+4. Call `retrieve` with the user's question to get the most relevant chunks across the whole corpus. Each chunk is tagged [from: <title>].
+5. Write your answer using ONLY the retrieved chunks, and cite the paper title each fact comes from.
 
 Rules:
-- Search AT MOST once. Only search a second time if the first search returned nothing on-topic.
-- Once you have parsed a paper, you MUST answer. Never go back to searching after parsing.
-- Base your answer strictly on the parsed chunks. If they don't contain the answer, say "I don't know based on this paper."
+- Search at most once, unless the first results are clearly off-topic.
+- You MUST ingest at least one paper and call `retrieve` before answering.
+- Base your answer strictly on the retrieved chunks. If they don't contain the answer, say "I don't know based on the retrieved papers."
 """
-
-ORCHESTRATOR_PROMPT = """You are a research coordinator. Break the user's question into focused 
-                        sub-questions and delegate each to the `ask_researcher` tool, which investigates
-                        one paper and returns a grounded answer. Call `ask_researcher` once per sub-question 
-                        (you may call it several times). Then synthesize the sub-answers into one final answer.
-                        Do not answer from your own knowledge — rely on the researcher's results.
-                        Try to only run a moderate amount of agents, maybe 2 on average"""
-
-orchestrator_tools = [{
-    "type": "function",
-    "function": {
-        "name": "ask_researcher",
-        "description": "Delegate a single focused research question to a sub-agent that reads one paper and returns a grounded answer.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "One focused research question."}
-            },
-            "required": ["question"],
-        },
-    },
-}]
