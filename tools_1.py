@@ -5,21 +5,22 @@ from pypdf import PdfReader
 import chromadb
 from sentence_transformers import CrossEncoder
 import io 
+from rank_bm25 import BM25Okapi
 
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   # small, standard, free
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db")   # persists across runs
+chroma_client = chromadb.PersistentClient(path="./chroma_db")  
 corpus = chroma_client.get_or_create_collection(name="arxiv_corpus")
 
 
-def search_arxiv(title):
+def search_arxiv(title, max_results=3):
     encoded_title = urllib.parse.quote(title)
-    url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_title}&start=0&max_results=3"
+    url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_title}&start=0&max_results={max_results}"
     raw = urllib.request.urlopen(url).read()
     feed = feedparser.parse(raw)
 
     papers = []
-    for entry in feed.entries[:3]:
+    for entry in feed.entries[:max_results]:
         pdf_url = next((link.href for link in entry.links if link.get("title") == "pdf"), None)
         paper_id = entry.id.rsplit("/", 1)[-1] if getattr(entry, "id", None) else None
         papers.append({
@@ -65,43 +66,120 @@ def ingest_paper(pdf_url, paper_id, title):
     )
     return f"Ingested '{title}' ({len(chunks)} chunks)."
 
+def retrieve_chunks(query, k=5, dense_k=20, sparse_k=20, fused_k=20,
+                    use_sparse=True, use_rerank=True):
+    results = corpus.query(query_texts=[query], n_results=dense_k)
+    dense_ids = results["ids"][0]
+    if not dense_ids:
+        return []
 
-def retrieve(query, k=5):
-    results = corpus.query(query_texts=[query], n_results=20)
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
+    all_data = corpus.get()
+    all_ids  = all_data["ids"]
+    all_docs = all_data["documents"]
+    id_to_doc  = dict(zip(all_ids, all_docs))
+    id_to_meta = dict(zip(all_ids, all_data["metadatas"]))
 
-    if not docs:
+    # candidate pool: hybrid (dense+sparse) or dense only
+    if use_sparse:
+        sparse_ids = build_sparse_ids(query, all_ids, all_docs, top_n=sparse_k)
+        cand_ids = rrf(dense_ids, sparse_ids)[:fused_k]
+    else:
+        cand_ids = dense_ids[:fused_k]
+
+    cand_docs  = [id_to_doc[i]  for i in cand_ids if i in id_to_doc]
+    cand_metas = [id_to_meta[i] for i in cand_ids if i in id_to_meta]
+    if not cand_docs:
+        return []
+
+    # optional rerank
+    if use_rerank:
+        scores = reranker.predict([(query, d) for d in cand_docs])
+        ranked = sorted(zip(scores, cand_docs, cand_metas), key=lambda x: x[0], reverse=True)[:k]
+        return [{"score": float(s), "doc": d, "title": m["title"], "paper_id": m["paper_id"]}
+                for s, d, m in ranked]
+    else:
+        top = list(zip(cand_docs, cand_metas))[:k]
+        return [{"score": None, "doc": d, "title": m["title"], "paper_id": m["paper_id"]}
+                for d, m in top]
+    
+def retrieve(query, k=5):                      # the agent-facing tool, now just formats
+    chunks = retrieve_chunks(query, k)
+    if not chunks:
         return "No relevant chunks found in the corpus. Ingest a paper first."
+    return "\n\n".join(f"[from: {c['title']}]\n{c['doc']}" for c in chunks)
 
-    pairs = [(query, doc) for doc in docs]
-    scores = reranker.predict(pairs)  # e.g. array([8.2, -3.1, 5.7, ...]) — higher = more relevant
 
-    ranked = sorted(zip(scores, docs, metas), key=lambda x: x[0], reverse=True)
-    top = ranked[:k]
+def build_sparse_ids(query, all_ids, all_docs, top_n=20):
+    if not all_docs:
+        return []
+    bm25 = BM25Okapi([d.lower().split() for d in all_docs])
+    bm25_scores = bm25.get_scores(query.lower().split())
+    return [all_ids[i] for i in sorted(range(len(all_ids)),
+                                       key=lambda i: bm25_scores[i], reverse=True)[:top_n]]
 
-    return "\n\n".join(f"[from: {meta['title']}]\n{doc}" for _, doc, meta in top)
+def rrf(dense_ids, sparse_ids, k_const=60):
+    scores = {}
+    for rank, doc_id in enumerate(dense_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k_const + rank)
+    for rank, doc_id in enumerate(sparse_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k_const + rank)
+    return sorted(scores, key=scores.get, reverse=True)
 
 def ab_test(query, k=5):
-    results = corpus.query(query_texts=[query], n_results=20)
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-
     def preview(doc):
-        return " ".join(doc.split())[:90]      # collapse whitespace, first 90 chars
+        return " ".join(doc.split())[:90]
 
     print(f"\n=== QUERY: {query} ===")
 
-    # A — raw embedding order (bi-encoder only; Chroma returns closest-first)
-    print("\n--- RAW (embeddings only) ---")
-    for i, (doc, meta) in enumerate(zip(docs[:k], metas[:k]), 1):
-        print(f"{i}. [{meta['title'][:40]}] {preview(doc)}")
+    # A — dense only (embeddings, no BM25, no rerank)
+    dense = corpus.query(query_texts=[query], n_results=k)
+    print("\n--- DENSE ONLY (embeddings) ---")
+    for i, (doc, meta) in enumerate(zip(dense["documents"][0], dense["metadatas"][0]), 1):
+        print(f"{i}. [{meta['title'][:35]}] {preview(doc)}")
 
-    # B — reranked (cross-encoder over all 20, keep top k)
-    scores = reranker.predict([(query, d) for d in docs])
-    ranked = sorted(zip(scores, docs, metas), key=lambda x: x[0], reverse=True)[:k]
-    print("\n--- RERANKED (cross-encoder) ---")
+    # B — full hybrid: dense + BM25 -> RRF -> rerank
+    dense_ids = corpus.query(query_texts=[query], n_results=20)["ids"][0]
+    all_data = corpus.get()
+    sparse_ids = build_sparse_ids(query, all_data["ids"], all_data["documents"], top_n=20)
+    id_to_doc = dict(zip(all_data["ids"], all_data["documents"]))
+    id_to_meta = dict(zip(all_data["ids"], all_data["metadatas"]))
+    fused_ids = rrf(dense_ids, sparse_ids)[:20]
+    fused_docs = [id_to_doc[i] for i in fused_ids if i in id_to_doc]
+    fused_metas = [id_to_meta[i] for i in fused_ids if i in id_to_meta]
+    scores = reranker.predict([(query, d) for d in fused_docs])
+    ranked = sorted(zip(scores, fused_docs, fused_metas), key=lambda x: x[0], reverse=True)[:k]
+    print("\n--- HYBRID + RERANK ---")
     for i, (score, doc, meta) in enumerate(ranked, 1):
-        print(f"{i}. [score {score:5.2f}] [{meta['title'][:40]}] {preview(doc)}")
+        print(f"{i}. [score {score:5.2f}] [{meta['title'][:35]}] {preview(doc)}")
 
 
+import time
+
+def bulk_ingest(arxiv_ids):
+    """Fetch metadata for a list of arXiv IDs and ingest each into the corpus."""
+    id_list = ",".join(arxiv_ids)
+    url = f"http://export.arxiv.org/api/query?id_list={id_list}&max_results={len(arxiv_ids)}"
+    raw = urllib.request.urlopen(url).read()
+    feed = feedparser.parse(raw)
+
+    for entry in feed.entries:
+        paper_id = entry.id.rsplit("/", 1)[-1] if getattr(entry, "id", None) else None
+        title = entry.title
+        pdf_url = next((link.href for link in entry.links if link.get("title") == "pdf"), None)
+        if not pdf_url:
+            print(f"  skip {paper_id}: no pdf link")
+            continue
+        print(ingest_paper(pdf_url, paper_id, title))   # prints "Ingested ..." or "already in corpus"
+        time.sleep(3)   # be polite to arXiv between PDF downloads
+
+
+def bulk_ingest_by_search(queries, per_query=4):
+    """Search arXiv for each topic and ingest the top results.
+    A fast, ID-free way to grow a diverse corpus."""
+    for q in queries:
+        print(f"--- searching: {q} ---")
+        for p in search_arxiv(q, max_results=per_query):
+            if not p["pdf_url"]:
+                continue
+            print(ingest_paper(p["pdf_url"], p["id"], p["title"]))
+            time.sleep(3)   # be polite to arXiv between PDF downloads

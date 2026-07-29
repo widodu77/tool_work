@@ -64,3 +64,26 @@ Rules:
 - Always retrieve BEFORE searching. Check the corpus first; arXiv is the fallback.
 - Base your answer strictly on the retrieved chunks. If they don't contain the answer, say "I don't know based on the corpus."
 """
+
+GOLDEN_SET = [
+    # FU-net
+    {"question": "What is feedback weighting in FU-net?", "expected_paper": "FU-net"},
+    {"question": "What does FU-net add to the standard U-net architecture?", "expected_paper": "FU-net"},
+
+    # Groundwater U-Net & ViT
+    {"question": "What RMSE improvement comes from adding a Vision Transformer to a U-Net for groundwater modelling?", "expected_paper": "Groundwater"},
+    {"question": "How do U-Net and the Fourier Neural Operator compare for groundwater forward modelling?", "expected_paper": "Groundwater"},
+    {"question": "Does increasing Vision Transformer depth keep improving groundwater prediction accuracy?", "expected_paper": "Groundwater"},
+
+    # ViT ("16x16 Words")
+    {"question": "How does a Vision Transformer split an image into patches?", "expected_paper": "16x16 Words"},
+    {"question": "How much pretraining data does a Vision Transformer need to beat CNNs?", "expected_paper": "16x16 Words"},
+
+    # Does Your ViT Still Need U-Net?
+    {"question": "Why did early ViT-based segmentation methods keep a U-Net-style decoder?", "expected_paper": "Does Your ViT"},
+    {"question": "What does the paper conclude about whether Vision Transformers still need U-Net decoders for segmentation?", "expected_paper": "Does Your ViT"},
+
+    # Vicinity Vision Transformer
+    {"question": "How does the Vicinity Vision Transformer reduce the cost of self-attention?", "expected_paper": "Vicinity"},
+    {"question": "How does the Vicinity Vision Transformer achieve linear complexity?", "expected_paper": "Vicinity"},
+]
