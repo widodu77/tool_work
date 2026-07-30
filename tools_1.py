@@ -1,11 +1,30 @@
 import urllib.parse
 import urllib.request
+import urllib.error
+import time
+import json
 import feedparser
 from pypdf import PdfReader
 import chromadb
 from sentence_transformers import CrossEncoder
-import io 
+import io
 from rank_bm25 import BM25Okapi
+
+# arXiv throttles requests that lack a descriptive User-Agent (harshly from datacenter IPs).
+_UA = "arxiv-research-agent/1.0 (+https://huggingface.co/spaces/widodu/arxiv-research-tool)"
+
+def _fetch(url, retries=3):
+    """GET a URL with a proper User-Agent and simple 429 backoff (arXiv is strict)."""
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))   # back off, then retry
+                continue
+            raise
 
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   
 
@@ -36,7 +55,7 @@ def get_corpus_index():
 def search_arxiv(title, max_results=3):
     encoded_title = urllib.parse.quote(title)
     url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_title}&start=0&max_results={max_results}"
-    raw = urllib.request.urlopen(url).read()
+    raw = _fetch(url)
     feed = feedparser.parse(raw)
 
     papers = []
@@ -66,8 +85,7 @@ def ingest_paper(pdf_url, paper_id, title):
         return f"'{title}' is already in the corpus."
 
     # Download the PDF
-    with urllib.request.urlopen(pdf_url) as response:
-        pdf_bytes = response.read()
+    pdf_bytes = _fetch(pdf_url)
 
 
     # Extract + chunk
@@ -85,6 +103,73 @@ def ingest_paper(pdf_url, paper_id, title):
                    for i in range(len(chunks))],
     )
     return f"Ingested '{title}' ({len(chunks)} chunks)."
+
+
+# --- OpenAlex (keyless, cloud-friendly, ~100k req/day) for the live-fetch path ---
+_OPENALEX = "https://api.openalex.org/works"
+
+def _abstract_from_inverted(inv):
+    """OpenAlex returns abstracts as a {word: [positions]} inverted index — rebuild the text."""
+    if not inv:
+        return ""
+    positions = {}
+    for word, idxs in inv.items():
+        for i in idxs:
+            positions[i] = word
+    return " ".join(positions[i] for i in sorted(positions))
+
+
+def search_openalex(query, limit=5):
+    """Search OpenAlex; returns papers with title, abstract, pdf_url, id."""
+    params = urllib.parse.urlencode({
+        "search": query,
+        "per_page": limit,
+        "filter": "has_abstract:true",
+        "select": "id,title,abstract_inverted_index,open_access,primary_location",
+    })
+    results = json.loads(_fetch(f"{_OPENALEX}?{params}")).get("results") or []
+    papers = []
+    for r in results:
+        abstract = _abstract_from_inverted(r.get("abstract_inverted_index"))
+        if not abstract:
+            continue
+        pdf = (r.get("open_access") or {}).get("oa_url") \
+              or (r.get("primary_location") or {}).get("pdf_url")
+        papers.append({
+            "title": r.get("title") or "Untitled",
+            "abstract": abstract,
+            "pdf_url": pdf,
+            "id": (r.get("id") or "").rsplit("/", 1)[-1],   # e.g. W2809090039
+        })
+    return papers
+
+
+def ingest_fetched_paper(paper):
+    """Ingest a fetched paper: full PDF text if it's a non-arXiv open-access PDF we can fetch,
+    otherwise the abstract (always available, avoids arXiv's cloud-IP throttling)."""
+    pid, title = paper["id"], paper["title"]
+    if corpus.get(where={"paper_id": pid}, limit=1)["ids"]:
+        return title   # already in corpus
+
+    text = paper["abstract"]
+    pdf = paper.get("pdf_url")
+    if pdf and "arxiv.org" not in pdf:          # arXiv PDFs get throttled on cloud IPs
+        try:
+            reader = PdfReader(io.BytesIO(_fetch(pdf, retries=1)))
+            full = "\n".join(page.extract_text() or "" for page in reader.pages)
+            if len(full) > len(text):
+                text = full
+        except Exception:
+            pass                                # fall back to the abstract
+
+    chunks = chunking(text)
+    corpus.add(
+        documents=chunks,
+        ids=[f"{pid}_chunk_{i}" for i in range(len(chunks))],
+        metadatas=[{"paper_id": pid, "title": title, "chunk_index": i} for i in range(len(chunks))],
+    )
+    return title
+
 
 def retrieve_chunks(query, k=5, dense_k=20, sparse_k=20, fused_k=20,
                     use_sparse=True, use_rerank=True):
@@ -178,7 +263,7 @@ def bulk_ingest(arxiv_ids):
     """Fetch metadata for a list of arXiv IDs and ingest each into the corpus."""
     id_list = ",".join(arxiv_ids)
     url = f"http://export.arxiv.org/api/query?id_list={id_list}&max_results={len(arxiv_ids)}"
-    raw = urllib.request.urlopen(url).read()
+    raw = _fetch(url)
     feed = feedparser.parse(raw)
 
     for entry in feed.entries:

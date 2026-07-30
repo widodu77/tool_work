@@ -9,7 +9,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from tools_1 import (corpus, get_corpus_index, build_sparse_ids, rrf, reranker,
-                     search_arxiv, ingest_paper)
+                     search_openalex, ingest_fetched_paper)
 
 load_dotenv()
 
@@ -93,39 +93,38 @@ def pipeline_events(question, force=False):
         if force or ranked[0][0] < MISS_THRESHOLD:
             yield sse({"type": "corpus_miss", "top_score": round(float(ranked[0][0]), 2),
                        "forced": force})
+            try:
+                # 1. reformulate the question into a focused keyword query
+                search_q = make_search_query(question)
+                yield sse({"type": "reformulate", "original": question, "query": search_q})
 
-            # improvement 1: turn the question into a focused arXiv keyword query
-            search_q = make_search_query(question)
-            yield sse({"type": "reformulate", "original": question, "query": search_q})
-            papers = search_arxiv(search_q, max_results=5)
-            yield sse({"type": "stage", "stage": "searching",
-                       "detail": {"papers": [p["title"] for p in papers]}})
+                # 2. search OpenAlex (keyless, tolerant of cloud IPs, unlike arXiv / S2)
+                papers = search_openalex(search_q, limit=5)
+                yield sse({"type": "stage", "stage": "searching",
+                           "detail": {"papers": [p["title"] for p in papers]}})
 
-            # improvement 2: try candidates in best-abstract-match order until one downloads
-            candidates = [p for p in papers if p["pdf_url"]]
-            ingested = None
-            if candidates:
-                ab_scores = reranker.predict([(question, p["abstract"]) for p in candidates])
-                order = sorted(range(len(candidates)), key=lambda i: ab_scores[i], reverse=True)
-                for i in order:
-                    target = candidates[i]
-                    try:
-                        ingest_paper(target["pdf_url"], target["id"], target["title"])
-                        ingested = target
-                        break
-                    except Exception:
-                        continue   # PDF 404 / download failed — fall through to the next best
+                # 3. ingest the paper whose abstract best matches (full PDF if available, else abstract)
+                ingested = None
+                if papers:
+                    ab_scores = reranker.predict([(question, p["abstract"]) for p in papers])
+                    best = papers[max(range(len(papers)), key=lambda i: ab_scores[i])]
+                    ingest_fetched_paper(best)
+                    ingested = best
 
-            yield sse({"type": "stage", "stage": "ingesting",
-                       "detail": {"title": ingested["title"] if ingested else "no downloadable paper found"}})
+                yield sse({"type": "stage", "stage": "ingesting",
+                           "detail": {"title": ingested["title"] if ingested else "no paper found"}})
 
-            if ingested:
-                # retry retrieval over the now-bigger corpus
-                for kind, val in retrieval_stages(question):
-                    if kind == "sse":
-                        yield val
-                    else:
-                        ranked = val
+                if ingested:
+                    # retry retrieval over the now-bigger corpus
+                    for kind, val in retrieval_stages(question):
+                        if kind == "sse":
+                            yield val
+                        else:
+                            ranked = val
+            except Exception:
+                # live source rate-limited / unavailable — degrade gracefully instead of crashing
+                yield sse({"type": "fetch_failed", "message":
+                    "The live paper lookup is unavailable right now. Answering from the existing corpus instead."})
 
         # --- answer, grounded in the (possibly refreshed) top chunks, streamed ---
         context = "\n\n".join(d for _, d, _ in ranked)
