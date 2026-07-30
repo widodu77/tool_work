@@ -74,9 +74,9 @@ def make_search_query(question):
     return resp.choices[0].message.content.strip().strip('"')
 
 
-def pipeline_events(question):
-    """Retrieve from the corpus; if it comes up empty-handed, go search arXiv,
-    ingest a paper, and retry — emitting an SSE event at every step."""
+def pipeline_events(question, force=False):
+    """Retrieve from the corpus; if it comes up empty-handed (or `force`), go search
+    arXiv, ingest a paper, and retry — emitting an SSE event at every step."""
     try:
         ranked = []
         for kind, val in retrieval_stages(question):
@@ -89,9 +89,10 @@ def pipeline_events(question):
             yield sse({"type": "error", "message": "Corpus is empty — ingest papers first."})
             return
 
-        # --- corpus miss: the best chunk isn't relevant → fetch a paper and retry ---
-        if ranked[0][0] < MISS_THRESHOLD:
-            yield sse({"type": "corpus_miss", "top_score": round(float(ranked[0][0]), 2)})
+        # --- corpus miss (or forced): fetch a fresh paper and retry ---
+        if force or ranked[0][0] < MISS_THRESHOLD:
+            yield sse({"type": "corpus_miss", "top_score": round(float(ranked[0][0]), 2),
+                       "forced": force})
 
             # improvement 1: turn the question into a focused arXiv keyword query
             search_q = make_search_query(question)
@@ -163,9 +164,9 @@ app.add_middleware(
 
 
 @app.get("/ask")
-def ask(q: str):
+def ask(q: str, force: bool = False):
     """Stream the retrieval pipeline + answer for a question, as SSE events."""
-    return StreamingResponse(pipeline_events(q), media_type="text/event-stream")
+    return StreamingResponse(pipeline_events(q, force), media_type="text/event-stream")
 
 
 @app.get("/")
