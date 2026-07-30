@@ -71,13 +71,14 @@ def judge_answer(question, answer):
     return 0  # unparseable
 
 
-def eval_answers(golden, use_sparse=True, use_rerank=True):
-    """Average answer-quality score across the golden set for one retrieval config."""
+def eval_answers(golden, use_sparse=True, use_rerank=True, answer_k=5):
+    """Average answer-quality score. `answer_k` = how many of the retrieved chunks
+    actually go to the answerer (retrieval still ranks a top-5 pool)."""
     total = 0
     for case in golden:
         chunks = retrieve_chunks(case["question"], k=5,
                                  use_sparse=use_sparse, use_rerank=use_rerank)
-        answer = answer_from_chunks(case["question"], chunks)
+        answer = answer_from_chunks(case["question"], chunks[:answer_k])
         total += judge_answer(case["question"], answer)
     return total / len(golden)
 
@@ -88,8 +89,16 @@ if __name__ == "__main__":
         ("dense + rerank",  dict(use_sparse=False, use_rerank=True)),
         ("hybrid + rerank", dict(use_sparse=True,  use_rerank=True)),
     ]
-    print(f"{'config':<18}{'Recall@5':>10}{'MRR':>8}{'AnswerScore':>13}")
+    # retrieval metrics (cheap, no LLM calls)
+    print(f"{'config':<18}{'Recall@5':>10}{'MRR':>8}")
     for name, cfg in configs:
         recall, mrr = eval_retrieval(description.GOLDEN_SET, k=5, **cfg)
-        ans = eval_answers(description.GOLDEN_SET, **cfg)
-        print(f"{name:<18}{recall:>10.2f}{mrr:>8.2f}{ans:>13.2f}")
+        print(f"{name:<18}{recall:>10.2f}{mrr:>8.2f}")
+
+    # answer quality: feed the answerer top-3 vs top-5 chunks.
+    # If reranking's benefit was washing out at k=5, it should re-appear at k=3.
+    print(f"\n{'config':<18}{'Ans@3':>8}{'Ans@5':>8}")
+    for name, cfg in configs:
+        a3 = eval_answers(description.GOLDEN_SET, answer_k=3, **cfg)
+        a5 = eval_answers(description.GOLDEN_SET, answer_k=5, **cfg)
+        print(f"{name:<18}{a3:>8.2f}{a5:>8.2f}")

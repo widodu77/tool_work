@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>arXiv Research Agent</title>
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]'], ['$$', '$$']] },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea'] }
+  };
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --green: #3fb950;
+    --amber: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  h1 .mono { font-family: ui-monospace, monospace; color: var(--accent); }
+  .stats { color: var(--dim); font-size: 0.85rem; font-family: ui-monospace, monospace; }
+  .search { display: flex; gap: 8px; margin: 24px 0; }
+  .search input { flex: 1; padding: 12px 14px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 1rem; }
+  .search input:focus { outline: none; border-color: var(--accent); }
+  .search button { padding: 12px 20px; background: var(--accent); color: #0d1117; border: none;
+    border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 1rem; }
+  .search button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .section-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--dim); margin: 28px 0 10px; }
+  .section-label.miss { color: var(--amber); }
+
+  .pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .pipeline.two { grid-template-columns: repeat(2, 1fr); }
+  .pipeline.fallback { grid-template-columns: 1.7fr 1fr; }
+  .reformulate { margin-top: 8px; font-size: 0.8rem; line-height: 1.9; }
+  .reformulate .rlabel { color: var(--dim); }
+  .reformulate .rquery { font-family: ui-monospace, monospace; color: var(--accent);
+    background: rgba(88,166,255,0.12); padding: 2px 8px; border-radius: 6px; }
+  .stage { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; opacity: 0.45; transition: all 0.25s; }
+  .stage.pending { opacity: 0.6; border-style: dashed; }
+  .stage.active { opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .stage.done { opacity: 1; border-color: var(--green); }
+  .stage .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px; }
+  .stage.active .dot { background: var(--accent); animation: pulse 1s infinite; }
+  .stage.done .dot { background: var(--green); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .stage .name { font-size: 0.8rem; font-weight: 600; }
+  .stage .sub { font-size: 0.7rem; color: var(--dim); }
+  .stage .detail { font-family: ui-monospace, monospace; font-size: 0.82rem; margin-top: 6px; color: var(--accent); }
+
+  .chunk { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--green);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+  .chunk .head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+  .chunk .title { font-size: 0.85rem; font-weight: 600; }
+  .chunk .score { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--amber);
+    background: rgba(210,153,34,0.12); padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
+  .chunk .preview { font-size: 0.78rem; color: var(--dim); margin-top: 5px; }
+
+  .answer { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 18px; min-height: 40px; font-size: 0.95rem; overflow-x: auto; }
+  .answer #ans-text { white-space: pre-wrap; }
+  .answer p { margin: 0 0 10px; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer table { border-collapse: collapse; margin: 10px 0; font-size: 0.88rem; }
+  .answer th, .answer td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .answer th { background: rgba(88,166,255,0.08); }
+  .answer code { background: rgba(110,118,129,0.25); padding: 1px 5px; border-radius: 4px;
+    font-family: ui-monospace, monospace; font-size: 0.85em; }
+  .answer pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow-x: auto; }
+  .answer pre code { background: none; padding: 0; }
+  .answer ul, .answer ol { margin: 0 0 10px; padding-left: 22px; }
+  .answer h1, .answer h2, .answer h3 { font-size: 1.05rem; margin: 12px 0 6px; }
+  .answer .cursor { display: inline-block; width: 7px; height: 1.1em; background: var(--accent);
+    vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .sources { display: flex; flex-wrap: wrap; gap: 8px; }
+  .source-pill { font-size: 0.78rem; background: rgba(88,166,255,0.12); color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.3); padding: 4px 10px; border-radius: 12px; }
+  .error { color: var(--red); background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.3);
+    padding: 12px; border-radius: 8px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="mono">arXiv</span> Research Agent</h1>
+    <div class="stats" id="stats">loading corpus…</div>
+  </header>
+
+  <div class="search">
+    <input id="q" placeholder="Ask about the research corpus…"
+           value="How does a Vision Transformer process an image?">
+    <button id="go" onclick="ask()">Ask</button>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="section-label">Retrieval pipeline</div>
+    <div class="pipeline">
+      <div class="stage" id="s-dense"><span class="dot"></span><span class="name">Dense</span>
+        <div class="sub">embeddings</div><div class="detail"></div></div>
+      <div class="stage" id="s-sparse"><span class="dot"></span><span class="name">BM25</span>
+        <div class="sub">keyword</div><div class="detail"></div></div>
+      <div class="stage" id="s-fused"><span class="dot"></span><span class="name">RRF Fusion</span>
+        <div class="sub">merge ranks</div><div class="detail"></div></div>
+      <div class="stage" id="s-reranked"><span class="dot"></span><span class="name">Rerank</span>
+        <div class="sub">cross-encoder</div><div class="detail"></div></div>
+    </div>
+
+    <div id="fallback" class="hidden">
+      <div class="section-label miss">⚠ Not in corpus — going to arXiv, then retrying</div>
+      <div class="pipeline fallback">
+        <div class="stage" id="s-searching"><span class="dot"></span><span class="name">Search arXiv</span>
+          <div class="sub">reformulate + find</div>
+          <div class="reformulate" id="reformulate-box"></div>
+          <div class="detail"></div></div>
+        <div class="stage" id="s-ingesting"><span class="dot"></span><span class="name">Ingest</span>
+          <div class="sub">download + embed</div><div class="detail"></div></div>
+      </div>
+    </div>
+
+    <div id="chunks-wrap" class="hidden">
+      <div class="section-label">Top-3 chunks (fed to the model)</div>
+      <div id="chunks"></div>
+    </div>
+
+    <div class="section-label">Answer</div>
+    <div class="answer" id="answer"></div>
+
+    <div id="sources-wrap" class="hidden">
+      <div class="section-label">Sources</div>
+      <div class="sources" id="sources"></div>
+    </div>
+
+    <div id="error" class="error hidden"></div>
+  </div>
+</div>
+
+<script>
+const STAGES = ["dense", "sparse", "fused", "reranked"];
+let es = null, finished = false, answerText = "";
+const $ = (id) => document.getElementById(id);
+
+fetch("/status").then(r => r.json()).then(d => {
+  $("stats").textContent = `${d.papers} papers · ${d.chunks.toLocaleString()} chunks`;
+}).catch(() => {});
+
+const trunc = (s, n) => s.length > n ? s.slice(0, n) + "…" : s;
+
+function setStage(id, cls, text) {
+  const el = $(id);
+  el.className = "stage " + cls;
+  if (text !== undefined) el.querySelector(".detail").textContent = text;
+}
+
+function resetUI() {
+  finished = false;
+  $("results").classList.remove("hidden");
+  answerText = "";
+  $("answer").innerHTML = '<span id="ans-text"></span><span class="cursor"></span>';
+  $("chunks").innerHTML = "";
+  $("chunks-wrap").classList.add("hidden");
+  $("sources").innerHTML = "";
+  $("sources-wrap").classList.add("hidden");
+  $("error").classList.add("hidden");
+  $("fallback").classList.add("hidden");
+  setStage("s-searching", "pending", "");
+  setStage("s-ingesting", "pending", "");
+  $("reformulate-box").innerHTML = "";
+  STAGES.forEach((s, i) => setStage("s-" + s, i === 0 ? "active" : "pending", ""));
+}
+
+function markMain(stage, text) {           // dense/sparse/fused/reranked
+  setStage("s-" + stage, "done", text);
+  const next = STAGES[STAGES.indexOf(stage) + 1];
+  if (next) setStage("s-" + next, "active");
+}
+
+function handle(msg) {
+  if (msg.type === "reformulate") {
+    setStage("s-searching", "active");
+    $("reformulate-box").innerHTML = '<span class="rlabel">reformulating into</span> <span class="rquery"></span>';
+    $("reformulate-box").querySelector(".rquery").textContent = msg.query;
+  } else if (msg.type === "corpus_miss") {
+    $("fallback").classList.remove("hidden");
+    setStage("s-searching", "active", "");
+    setStage("s-ingesting", "pending", "");
+    STAGES.forEach(s => setStage("s-" + s, "pending", ""));   // reset for the retry
+    $("chunks-wrap").classList.add("hidden");
+  } else if (msg.type === "stage") {
+    const st = msg.stage;
+    if (st === "searching") {
+      setStage("s-searching", "done", `${msg.detail.papers.length} papers found`);
+      setStage("s-ingesting", "active");
+    } else if (st === "ingesting") {
+      setStage("s-ingesting", "done", trunc(msg.detail.title, 42));
+      setStage("s-dense", "active");                          // retry begins
+    } else if (st === "reranked") {
+      markMain("reranked", `top ${msg.detail.chunks.length}`);
+      renderChunks(msg.detail.chunks);
+    } else if (st === "dense")  markMain("dense",  `${msg.detail.candidates} candidates`);
+    else if (st === "sparse")   markMain("sparse", `${msg.detail.candidates} candidates`);
+    else if (st === "fused")    markMain("fused",  `pool of ${msg.detail.pool}`);
+  } else if (msg.type === "answer_delta") {
+    answerText += msg.text;
+    $("ans-text").textContent = answerText;   // plain text while streaming
+  } else if (msg.type === "done") {
+    finished = true;
+    $("answer").innerHTML = marked.parse(answerText);   // render markdown once complete
+    if (window.MathJax && window.MathJax.typesetPromise) window.MathJax.typesetPromise([$("answer")]);
+    renderSources(msg.sources);
+    stop();
+  } else if (msg.type === "error") {
+    finished = true;
+    showError(msg.message);
+    stop();
+  }
+}
+
+function renderChunks(chunks) {
+  const box = $("chunks");
+  box.innerHTML = "";
+  chunks.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "chunk";
+    div.innerHTML = `<div class="head"><span class="title"></span>
+      <span class="score">score ${c.score}</span></div><div class="preview"></div>`;
+    div.querySelector(".title").textContent = c.title;
+    div.querySelector(".preview").textContent = c.preview + "…";
+    box.appendChild(div);
+  });
+  $("chunks-wrap").classList.remove("hidden");
+}
+
+function renderSources(sources) {
+  const box = $("sources");
+  sources.forEach(s => {
+    const pill = document.createElement("span");
+    pill.className = "source-pill";
+    pill.textContent = s;
+    box.appendChild(pill);
+  });
+  $("sources-wrap").classList.remove("hidden");
+}
+
+function showError(m) {
+  const e = $("error");
+  e.textContent = "Error: " + m;
+  e.classList.remove("hidden");
+  $("answer").querySelector(".cursor")?.remove();
+}
+
+function stop() {
+  if (es) { es.close(); es = null; }
+  $("go").disabled = false;
+}
+
+function ask() {
+  const q = $("q").value.trim();
+  if (!q) return;
+  if (es) es.close();
+  $("go").disabled = true;
+  resetUI();
+  es = new EventSource("/ask?q=" + encodeURIComponent(q));
+  es.onmessage = (e) => handle(JSON.parse(e.data));
+  es.onerror = () => { if (!finished) { showError("connection lost"); stop(); } };
+}
+
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+</script>
+</body>
+</html>

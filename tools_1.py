@@ -9,8 +9,28 @@ from rank_bm25 import BM25Okapi
 
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")   
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db")  
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
 corpus = chroma_client.get_or_create_collection(name="arxiv_corpus")
+
+
+# --- cached corpus snapshot + BM25 index ---
+# Rebuilt only when the corpus size changes (i.e. after an ingest), so we don't
+# re-pull 10K chunks and rebuild BM25 on every single query.
+_index_cache = {"count": None}
+
+def get_corpus_index():
+    count = corpus.count()
+    if _index_cache["count"] != count:
+        data = corpus.get()
+        ids, docs, metas = data["ids"], data["documents"], data["metadatas"]
+        _index_cache.update({
+            "count": count,
+            "ids": ids,
+            "id_to_doc": dict(zip(ids, docs)),
+            "id_to_meta": dict(zip(ids, metas)),
+            "bm25": BM25Okapi([d.lower().split() for d in docs]) if docs else None,
+        })
+    return _index_cache
 
 
 def search_arxiv(title, max_results=3):
@@ -73,15 +93,13 @@ def retrieve_chunks(query, k=5, dense_k=20, sparse_k=20, fused_k=20,
     if not dense_ids:
         return []
 
-    all_data = corpus.get()
-    all_ids  = all_data["ids"]
-    all_docs = all_data["documents"]
-    id_to_doc  = dict(zip(all_ids, all_docs))
-    id_to_meta = dict(zip(all_ids, all_data["metadatas"]))
+    idx = get_corpus_index()
+    id_to_doc  = idx["id_to_doc"]
+    id_to_meta = idx["id_to_meta"]
 
     # candidate pool: hybrid (dense+sparse) or dense only
     if use_sparse:
-        sparse_ids = build_sparse_ids(query, all_ids, all_docs, top_n=sparse_k)
+        sparse_ids = build_sparse_ids(query, top_n=sparse_k)
         cand_ids = rrf(dense_ids, sparse_ids)[:fused_k]
     else:
         cand_ids = dense_ids[:fused_k]
@@ -102,20 +120,21 @@ def retrieve_chunks(query, k=5, dense_k=20, sparse_k=20, fused_k=20,
         return [{"score": None, "doc": d, "title": m["title"], "paper_id": m["paper_id"]}
                 for d, m in top]
     
-def retrieve(query, k=5):                      # the agent-facing tool, now just formats
+def retrieve(query, k=3):                      # top-3 won on the eval (hybrid+rerank, Ans@3 = 4.18)
     chunks = retrieve_chunks(query, k)
     if not chunks:
         return "No relevant chunks found in the corpus. Ingest a paper first."
     return "\n\n".join(f"[from: {c['title']}]\n{c['doc']}" for c in chunks)
 
 
-def build_sparse_ids(query, all_ids, all_docs, top_n=20):
-    if not all_docs:
+def build_sparse_ids(query, top_n=20):
+    idx = get_corpus_index()
+    if idx["bm25"] is None:
         return []
-    bm25 = BM25Okapi([d.lower().split() for d in all_docs])
-    bm25_scores = bm25.get_scores(query.lower().split())
-    return [all_ids[i] for i in sorted(range(len(all_ids)),
-                                       key=lambda i: bm25_scores[i], reverse=True)[:top_n]]
+    ids = idx["ids"]
+    bm25_scores = idx["bm25"].get_scores(query.lower().split())
+    return [ids[i] for i in sorted(range(len(ids)),
+                                   key=lambda i: bm25_scores[i], reverse=True)[:top_n]]
 
 def rrf(dense_ids, sparse_ids, k_const=60):
     scores = {}
@@ -139,10 +158,10 @@ def ab_test(query, k=5):
 
     # B — full hybrid: dense + BM25 -> RRF -> rerank
     dense_ids = corpus.query(query_texts=[query], n_results=20)["ids"][0]
-    all_data = corpus.get()
-    sparse_ids = build_sparse_ids(query, all_data["ids"], all_data["documents"], top_n=20)
-    id_to_doc = dict(zip(all_data["ids"], all_data["documents"]))
-    id_to_meta = dict(zip(all_data["ids"], all_data["metadatas"]))
+    idx = get_corpus_index()
+    sparse_ids = build_sparse_ids(query, top_n=20)
+    id_to_doc = idx["id_to_doc"]
+    id_to_meta = idx["id_to_meta"]
     fused_ids = rrf(dense_ids, sparse_ids)[:20]
     fused_docs = [id_to_doc[i] for i in fused_ids if i in id_to_doc]
     fused_metas = [id_to_meta[i] for i in fused_ids if i in id_to_meta]

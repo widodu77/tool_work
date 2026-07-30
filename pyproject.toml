@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "chromadb>=1.5.9",
     "dotenv>=0.9.9",
+    "fastapi>=0.141.1",
     "feedparser>=6.0.12",
     "ollama>=0.6.2",
     "openai>=2.45.0",
@@ -14,4 +15,5 @@ dependencies = [
     "pypdf>=6.14.2",
     "rank-bm25>=0.2.2",
     "sentence-transformers>=5.6.0",
+    "uvicorn[standard]>=0.51.0",
 ]
