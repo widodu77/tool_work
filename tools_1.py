@@ -1,3 +1,4 @@
+import os
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -107,6 +108,7 @@ def ingest_paper(pdf_url, paper_id, title):
 
 # --- OpenAlex (keyless, cloud-friendly, ~100k req/day) for the live-fetch path ---
 _OPENALEX = "https://api.openalex.org/works"
+_OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO")   # set this to join OpenAlex's faster "polite pool"
 
 def _abstract_from_inverted(inv):
     """OpenAlex returns abstracts as a {word: [positions]} inverted index — rebuild the text."""
@@ -121,12 +123,15 @@ def _abstract_from_inverted(inv):
 
 def search_openalex(query, limit=5):
     """Search OpenAlex; returns papers with title, abstract, pdf_url, id."""
-    params = urllib.parse.urlencode({
+    query_params = {
         "search": query,
         "per_page": limit,
         "filter": "has_abstract:true",
         "select": "id,title,abstract_inverted_index,open_access,primary_location",
-    })
+    }
+    if _OPENALEX_MAILTO:                     # polite pool → steadier limits, esp. from cloud IPs
+        query_params["mailto"] = _OPENALEX_MAILTO
+    params = urllib.parse.urlencode(query_params)
     results = json.loads(_fetch(f"{_OPENALEX}?{params}")).get("results") or []
     papers = []
     for r in results:

@@ -1,5 +1,6 @@
 import os
 import json
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -122,6 +123,7 @@ def pipeline_events(question, force=False):
                         else:
                             ranked = val
             except Exception:
+                traceback.print_exc()   # real cause shows in the HF Space "Logs" tab
                 # live source rate-limited / unavailable — degrade gracefully instead of crashing
                 yield sse({"type": "fetch_failed", "message":
                     "The live paper lookup is unavailable right now. Answering from the existing corpus instead."})
